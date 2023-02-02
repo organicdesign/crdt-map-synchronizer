@@ -1,16 +1,10 @@
-import {
-	CRDT,
-	CRDTSynchronizer,
-	SyncContext,
-	toSynchronizable,
-	isSynchronizable
-} from "../../crdt-interfaces/src/index.js";
-//} from "@organicdesign/crdt-interfaces";
+import type { CRDTSynchronizer, CRDT, SynchronizableCRDT, SyncContext } from "@organicdesign/crdt-interfaces";
+import { BufferMap } from "@organicdesign/buffer-collections";
 import { SyncMessage, MessageType } from "./CRDTSyncProtocol.js";
 
 export interface CRDTMapSyncComponents {
 	getCRDTKeys (): Iterable<string>
-	getCrdt (key: string): CRDT | undefined
+	getCrdt (key: string): CRDT | SynchronizableCRDT | undefined
 	getId (): Uint8Array
 }
 
@@ -18,269 +12,281 @@ export interface CRDTMapSyncOpts {
 	protocol: string
 }
 
+interface Store {
+	crdt?: string
+	protocol?: string
+	crdtIterator?: Iterator<string>
+	protocolIterator?: Iterator<string>
+}
+
+const isSynchronizableCRDT = (crdt: CRDT) => crdt["getSynchronizer"] && crdt["getSynchronizerProtocols"];
+
 export class CRDTMapSynchronizer implements CRDTSynchronizer {
 	public readonly protocol: string;
 	private readonly components: CRDTMapSyncComponents;
+	private readonly inStore = new BufferMap<Store>();
+	private readonly outStore = new BufferMap<Store>();
+	private readonly genMsgId = (() => {
+		let id = 0;
+
+		return () => id++;
+	})();
 
 	constructor(components: CRDTMapSyncComponents, options: Partial<CRDTMapSyncOpts> = {}) {
-		this.protocol = options.protocol ?? "/stateless-crdt-map/0.1.0";
+		this.protocol = options.protocol ?? "/crdt-map/0.1.0";
 		this.components = components;
 	}
 
 	sync (data: Uint8Array | undefined, context: SyncContext): Uint8Array | undefined {
 		if (data == null) {
-			const crdt = this.getNextCrdt();
-
-			return SyncMessage.encode({
-				type: MessageType.SELECT,
-				crdt
-			});
+			this.inStore.clear();
+			this.outStore.clear();
+			return this.selectCRDT(context.id);
 		}
 
 		const message = SyncMessage.decode(data);
 
 		switch (message.type) {
 			case MessageType.SELECT_RESPONSE:
-				return this.handleSelectResponse(message, context);
+				return this.handleCRDTSelectResponse(message, context.id);
 			case MessageType.SYNC_RESPONSE:
-				return this.handleSyncResponse(message, context);
+				return this.handleCRDTSyncResponse(message, context.id);
 			case MessageType.SYNC:
-				return this.handleSync(message, context);
-			case MessageType.SELECT:
-				return this.handleSelect(message);
+				return this.handleCRDTSync(message, context.id);
+			case MessageType.SELECT_CRDT:
+				return this.handleCRDTSelect(message, context.id);
+			case MessageType.SELECT_PROTOCOL:
+				return this.handleProtocolSelect(message, context.id);
 			default:
 				throw new Error(`recieved unknown message type: ${message.type}`);
 		}
 	}
 
-	private handleSelectResponse (message: SyncMessage, context: SyncContext) {
-		if (message.accept) {
-			if (message.crdt != null && message.protocol != null) {
-				// Accepted both protocol and crdt
-				const crdt = this.components.getCrdt(message.crdt);
+	private handleCRDTSelectResponse (message: SyncMessage, id: Uint8Array) {
+		if (message.type !== MessageType.SELECT_RESPONSE) {
+			throw new Error(`invalid handler for message of type: ${message.type}`);
+		}
 
-				if (crdt == null || !isSynchronizable(crdt)) {
-					return this.selectNextCrdt(message.crdt);
-				}
+		const accepted = !!message.accept;
+		const store = this.outStore.get(id);
 
-				const synchronizer = toSynchronizable(crdt)?.getSynchronizer(message.protocol);
+		if (store == null || store.crdt == null) {
+			return this.selectCRDT(id);
+		}
 
-				if (synchronizer == null) {
-					return this.selectNextProtocol(message.crdt, message.protocol);
-				}
+		if (store.protocol != null && accepted) {
+			return this.runSync(id);
+		}
 
-				return SyncMessage.encode({
-					type: MessageType.SYNC,
-					sync: synchronizer.sync(undefined, context),
-					crdt: message.crdt,
-					protocol: message.protocol
-				});
-			}
+		return this.selectProtocol(id);
+	}
 
-			if (message.crdt != null) {
-				return this.selectNextProtocol(message.crdt, message.protocol);
-			}
+	private handleCRDTSync (message: SyncMessage, id: Uint8Array) {
+		if (message.type !== MessageType.SYNC) {
+			throw new Error(`invalid handler for message of type: ${message.type}`);
+		}
+
+		return this.runSync(id, message);
+	}
+
+	private handleCRDTSyncResponse (message: SyncMessage, id: Uint8Array) {
+		if (message.type !== MessageType.SYNC_RESPONSE) {
+			throw new Error(`invalid handler for message of type: ${message.type}`);
+		}
+
+		return this.runSync(id, message);
+	}
+
+	private runSync (id: Uint8Array, message?: SyncMessage) {
+		if (message != null && ![MessageType.SYNC_RESPONSE, MessageType.SYNC].includes(message.type)) {
+			throw new Error(`invalid handler for message of type: ${message.type}`);
+		}
+
+		const direction = (message == null || message.type === MessageType.SYNC_RESPONSE) ? "out" : "in";
+		const store = (direction === "out" ? this.outStore : this.inStore).get(id);
+		const key = store?.crdt;
+		const protocol = store?.protocol;
+
+		if (store == null || key == null || protocol == null) {
+			return;
+			//throw new Error("invalid state");
+		}
+
+		const crdt = this.components.getCrdt(key);
+
+		if (crdt == null || !isSynchronizableCRDT(crdt)) {
+			throw new Error("invalid crdt");
+		}
+
+		const synchronizer = (crdt as SynchronizableCRDT).getSynchronizer(protocol);
+
+		if (synchronizer == null) {
+			throw new Error("invalid protocol");
+		}
+
+		const messageId = message?.id ?? this.genMsgId();
+		const syncData = synchronizer.sync(message?.sync, { id, syncId: messageId });
+
+		if (syncData == null && direction === "out") {
+			return this.selectCRDT(id);
+		}
+
+		if (syncData == null) {
+			return;
+		}
+
+		return SyncMessage.encode({
+			type: direction === "out" ? MessageType.SYNC : MessageType.SYNC_RESPONSE,
+			id: messageId,
+			sync: syncData
+		});
+	}
+
+	private handleCRDTSelect (message: SyncMessage, id: Uint8Array) {
+		if (message.type !== MessageType.SELECT_CRDT) {
+			throw new Error(`invalid handler for message of type: ${message.type}`);
+		}
+
+		const key = message.select;
+
+		if (key == null) {
+			throw new Error(`SELECT_CRDT message must include the select parameter`);
+		}
+
+		const hasCrdt = !!this.components.getCrdt(key);
+
+		if (hasCrdt) {
+			this.inStore.set(id, {
+				crdt: key
+			});
 		} else {
-			if (message.crdt != null && message.protocol != null) {
-				return this.selectNextProtocol(message.crdt, message.protocol);
-			}
-
-			if (message.crdt != null) {
-				// Rejected only CRDT
-				return this.selectNextCrdt(message.crdt);
-			}
+			this.inStore.set(id, {});
 		}
 
-		throw new Error("SELECT_RESPONSE must include crdt");
-	}
-
-	private handleSyncResponse (message: SyncMessage, context: SyncContext) {
-		if (message.protocol == null || message.crdt == null) {
-			throw new Error("missing protocol or crdt");
-		}
-
-		if (message.sync == null || message.sync.length === 0) {
-			return this.selectNextCrdt(message.crdt);
-		}
-
-		const crdt = this.components.getCrdt(message.crdt);
-
-		if (crdt == null || !isSynchronizable(crdt)) {
-			return this.rejectCrdt(message.crdt);
-		}
-
-		const synchronizer = toSynchronizable(crdt)?.getSynchronizer(message.protocol);
-
-		if (synchronizer == null) {
-			return this.rejectProtocol(message.crdt, message.protocol);
-		}
-
-		return SyncMessage.encode({
-			type: MessageType.SYNC,
-			sync: synchronizer.sync(message.sync, context),
-			crdt: message.crdt,
-			protocol: message.protocol
-		});
-	}
-
-	private handleSync (message: SyncMessage, context: SyncContext) {
-		if (message.protocol == null || message.crdt == null) {
-			throw new Error("missing protocol or crdt");
-		}
-
-		const crdt = this.components.getCrdt(message.crdt);
-
-		if (crdt == null || !isSynchronizable(crdt)) {
-			return this.rejectCrdt(message.crdt);
-		}
-
-		const synchronizer = toSynchronizable(crdt)?.getSynchronizer(message.protocol);
-
-		if (synchronizer == null) {
-			return this.rejectProtocol(message.crdt, message.protocol);
-		}
-
-		return SyncMessage.encode({
-			type: MessageType.SYNC_RESPONSE,
-			sync: synchronizer.sync(message.sync, context),
-			crdt: message.crdt,
-			protocol: message.protocol
-		});
-	}
-
-	private handleSelect (message: SyncMessage) {
-		if (message.crdt != null && message.protocol != null) {
-			// Trying to select protocol
-			const crdt = this.components.getCrdt(message.crdt);
-
-			if (crdt == null || !isSynchronizable(crdt)) {
-				return this.rejectCrdt(message.crdt);
-			}
-
-			const synchronizer = toSynchronizable(crdt)?.getSynchronizer(message.protocol);
-
-			if (synchronizer == null) {
-				return this.rejectProtocol(message.crdt, message.protocol);
-			}
-
-			return this.acceptProtocol(message.crdt, message.protocol);
-		}
-
-		if (message.crdt != null) {
-			// Trying to select CRDT
-			if (this.components.getCrdt(message.crdt) == null) {
-				return this.rejectCrdt(message.crdt);
-			}
-
-			return this.acceptCrdt(message.crdt);
-		}
-
-		throw new Error("SELECT must include crdt");
-	}
-
-	private acceptProtocol (crdt: string, protocol: string) {
 		return SyncMessage.encode({
 			type: MessageType.SELECT_RESPONSE,
-			accept: true,
-			crdt,
-			protocol
+			accept: hasCrdt,
+			id: message.id
 		});
 	}
 
-	private acceptCrdt (crdt: string) {
-		return SyncMessage.encode({
-			type: MessageType.SELECT_RESPONSE,
-			accept: true,
-			crdt
-		});
-	}
+	private handleProtocolSelect (message: SyncMessage, id: Uint8Array) {
+		if (message.type !== MessageType.SELECT_PROTOCOL) {
+			throw new Error(`invalid handler for message of type: ${message.type}`);
+		}
 
-	private rejectProtocol (crdt: string, protocol: string) {
-		return SyncMessage.encode({
-			type: MessageType.SELECT_RESPONSE,
-			accept: false,
-			crdt,
-			protocol
-		});
-	}
+		const protocol = message.select;
 
-	private rejectCrdt (crdt: string) {
-		return SyncMessage.encode({
-			type: MessageType.SELECT_RESPONSE,
-			accept: false,
-			crdt
-		});
-	}
+		if (protocol == null) {
+			throw new Error(`SELECT_PROTOCOL message must include the select parameter`);
+		}
 
-	// Create a messsage that selects the next protocol.
-	private selectNextProtocol (crdt: string, protocol?: string) {
-		const next = this.getNextProtocol(crdt, protocol);
+		const store = this.inStore.get(id);
+		const crdtKey = store?.crdt;
 
-		if (next == null) {
-			return this.selectNextCrdt(crdt);
+		if (store == null || crdtKey == null) {
+			return SyncMessage.encode({
+				type: MessageType.SELECT_RESPONSE,
+				accept: false,
+				id: message.id
+			});
+		}
+
+		const crdt = this.components.getCrdt(crdtKey);
+
+		if (crdt == null || !isSynchronizableCRDT(crdt)) {
+			return SyncMessage.encode({
+				type: MessageType.SELECT_RESPONSE,
+				accept: false,
+				id: message.id
+			});
+		}
+
+		const hasSynchronizer = !!(crdt as SynchronizableCRDT).getSynchronizer(protocol);
+
+		if (hasSynchronizer) {
+			this.inStore.set(id, {
+				...store,
+				protocol
+			});
 		}
 
 		return SyncMessage.encode({
-			type: MessageType.SELECT,
-			crdt,
-			protocol: next
+			type: MessageType.SELECT_RESPONSE,
+			accept: hasSynchronizer,
+			id: message.id
 		});
 	}
 
-	// Create a message that selects the next CRDT.
-	private selectNextCrdt (name?: string) {
-		const crdt = this.getNextCrdt(name);
+	private selectCRDT (id: Uint8Array) {
+		const store = this.outStore.get(id);
+		let iterator: Iterator<string>;
 
-		if (crdt == null) {
+		if (store == null || store.crdtIterator == null) {
+			iterator = this.components.getCRDTKeys()[Symbol.iterator]();
+		} else {
+			iterator = store.crdtIterator;
+		}
+
+		const itrResult = iterator.next();
+		const key = itrResult.value;
+
+		if (itrResult.done) {
 			return;
 		}
 
+		this.outStore.set(id, {
+			crdt: key,
+			crdtIterator: iterator
+		});
+
 		return SyncMessage.encode({
-			type: MessageType.SELECT,
-			crdt
+			type: MessageType.SELECT_CRDT,
+			select: key,
+			id: this.genMsgId()
 		});
 	}
 
-	// Get the next CRDT name.
-	private getNextCrdt(last?: string) {
-		return this.getNext(this.components.getCRDTKeys(), last);
-	}
+	private selectProtocol (id: Uint8Array) {
+		const store = this.outStore.get(id);
 
-	// Get the next protocol name.
-	private getNextProtocol(crdtName: string, last?: string) {
-		const crdt = this.components.getCrdt(crdtName);
-
-		if (crdt == null || !isSynchronizable(crdt)) {
-			return;
+		if (store == null || store.crdt == null) {
+			return this.selectCRDT(id);
 		}
 
-		const iterable = toSynchronizable(crdt)?.getSynchronizerProtocols();
+		const crdt = this.components.getCrdt(store?.crdt);
 
-		if (!iterable) {
-			return;
+		if (crdt == null || !isSynchronizableCRDT(crdt)) {
+			return this.selectCRDT(id);
 		}
 
-		return this.getNext(iterable, last);
-	}
+		let iterator: Iterator<string>;
 
-	// Get the next value from an iterable.
-	private getNext (iterable: Iterable<string>, last?: string): string | undefined {
-		const iterator = iterable[Symbol.iterator]();
-		let curr = iterator.next();
-
-		if (last == null) {
-			return curr.value;
+		if (store.protocolIterator == null) {
+			iterator = (crdt as SynchronizableCRDT).getSynchronizerProtocols()[Symbol.iterator]();
+		} else {
+			iterator = store.protocolIterator;
 		}
 
-		while (!curr.done) {
-			if (curr.value === last) {
-				return iterator.next().value;
-			}
+		const itrResult = iterator.next();
+		const protocol = itrResult.value;
 
-			curr = iterator.next();
+		if (itrResult.done) {
+			return this.selectCRDT(id);
 		}
 
-		return curr.value;
+		this.outStore.set(id, {
+			crdt: store.crdt,
+			crdtIterator: store.crdtIterator,
+			protocol,
+			protocolIterator: iterator
+		});
+
+		return SyncMessage.encode({
+			type: MessageType.SELECT_PROTOCOL,
+			select: protocol,
+			id: this.genMsgId()
+		});
 	}
 }
 

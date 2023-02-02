@@ -9,17 +9,19 @@ import type { Codec } from 'protons-runtime'
 import type { Uint8ArrayList } from 'uint8arraylist'
 
 export enum MessageType {
-  SELECT = 'SELECT',
+  SELECT_CRDT = 'SELECT_CRDT',
+  SELECT_PROTOCOL = 'SELECT_PROTOCOL',
   SELECT_RESPONSE = 'SELECT_RESPONSE',
   SYNC = 'SYNC',
   SYNC_RESPONSE = 'SYNC_RESPONSE'
 }
 
 enum __MessageTypeValues {
-  SELECT = 0,
-  SELECT_RESPONSE = 1,
-  SYNC = 2,
-  SYNC_RESPONSE = 3
+  SELECT_CRDT = 0,
+  SELECT_PROTOCOL = 1,
+  SELECT_RESPONSE = 2,
+  SYNC = 3,
+  SYNC_RESPONSE = 4
 }
 
 export namespace MessageType {
@@ -29,9 +31,9 @@ export namespace MessageType {
 }
 export interface SyncMessage {
   type: MessageType
+  id: number
   sync?: Uint8Array
-  crdt?: string
-  protocol?: string
+  select?: string
   accept?: boolean
 }
 
@@ -47,22 +49,22 @@ export namespace SyncMessage {
 
         if (opts.writeDefaults === true || (obj.type != null && __MessageTypeValues[obj.type] !== 0)) {
           w.uint32(8)
-          MessageType.codec().encode(obj.type ?? MessageType.SELECT, w)
+          MessageType.codec().encode(obj.type ?? MessageType.SELECT_CRDT, w)
+        }
+
+        if (opts.writeDefaults === true || (obj.id != null && obj.id !== 0)) {
+          w.uint32(16)
+          w.uint32(obj.id ?? 0)
         }
 
         if (obj.sync != null) {
-          w.uint32(18)
+          w.uint32(26)
           w.bytes(obj.sync)
         }
 
-        if (obj.crdt != null) {
-          w.uint32(26)
-          w.string(obj.crdt)
-        }
-
-        if (obj.protocol != null) {
+        if (obj.select != null) {
           w.uint32(34)
-          w.string(obj.protocol)
+          w.string(obj.select)
         }
 
         if (obj.accept != null) {
@@ -75,7 +77,8 @@ export namespace SyncMessage {
         }
       }, (reader, length) => {
         const obj: any = {
-          type: MessageType.SELECT
+          type: MessageType.SELECT_CRDT,
+          id: 0
         }
 
         const end = length == null ? reader.len : reader.pos + length
@@ -88,13 +91,13 @@ export namespace SyncMessage {
               obj.type = MessageType.codec().decode(reader)
               break
             case 2:
-              obj.sync = reader.bytes()
+              obj.id = reader.uint32()
               break
             case 3:
-              obj.crdt = reader.string()
+              obj.sync = reader.bytes()
               break
             case 4:
-              obj.protocol = reader.string()
+              obj.select = reader.string()
               break
             case 5:
               obj.accept = reader.bool()
