@@ -2,15 +2,16 @@ import {
 	CRDT,
 	CRDTSynchronizer,
 	SyncContext,
-	toSynchronizable,
-	isSynchronizable
+	isSynchronizable,
+	getSynchronizer,
+	getSynchronizerProtocols
 } from "../../crdt-interfaces/src/index.js";
 //} from "@organicdesign/crdt-interfaces";
 import { SyncMessage, MessageType } from "./CRDTSyncProtocol.js";
 
 export interface CRDTMapSyncComponents {
-	getCRDTKeys (): Iterable<string>
-	getCrdt (key: string): CRDT | undefined
+	keys (): Iterable<string>
+	get (key: string): CRDT | undefined
 	getId (): Uint8Array
 }
 
@@ -57,13 +58,13 @@ export class CRDTMapSynchronizer implements CRDTSynchronizer {
 		if (message.accept) {
 			if (message.crdt != null && message.protocol != null) {
 				// Accepted both protocol and crdt
-				const crdt = this.components.getCrdt(message.crdt);
+				const crdt = this.components.get(message.crdt);
 
 				if (crdt == null || !isSynchronizable(crdt)) {
 					return this.selectNextCrdt(message.crdt);
 				}
 
-				const synchronizer = toSynchronizable(crdt)?.getSynchronizer(message.protocol);
+				const synchronizer = getSynchronizer(crdt, message.protocol);
 
 				if (synchronizer == null) {
 					return this.selectNextProtocol(message.crdt, message.protocol);
@@ -103,13 +104,13 @@ export class CRDTMapSynchronizer implements CRDTSynchronizer {
 			return this.selectNextCrdt(message.crdt);
 		}
 
-		const crdt = this.components.getCrdt(message.crdt);
+		const crdt = this.components.get(message.crdt);
 
 		if (crdt == null || !isSynchronizable(crdt)) {
 			return this.rejectCrdt(message.crdt);
 		}
 
-		const synchronizer = toSynchronizable(crdt)?.getSynchronizer(message.protocol);
+		const synchronizer = getSynchronizer(crdt, message.protocol);
 
 		if (synchronizer == null) {
 			return this.rejectProtocol(message.crdt, message.protocol);
@@ -128,13 +129,13 @@ export class CRDTMapSynchronizer implements CRDTSynchronizer {
 			throw new Error("missing protocol or crdt");
 		}
 
-		const crdt = this.components.getCrdt(message.crdt);
+		const crdt = this.components.get(message.crdt);
 
 		if (crdt == null || !isSynchronizable(crdt)) {
 			return this.rejectCrdt(message.crdt);
 		}
 
-		const synchronizer = toSynchronizable(crdt)?.getSynchronizer(message.protocol);
+		const synchronizer = getSynchronizer(crdt, message.protocol);
 
 		if (synchronizer == null) {
 			return this.rejectProtocol(message.crdt, message.protocol);
@@ -151,13 +152,13 @@ export class CRDTMapSynchronizer implements CRDTSynchronizer {
 	private handleSelect (message: SyncMessage) {
 		if (message.crdt != null && message.protocol != null) {
 			// Trying to select protocol
-			const crdt = this.components.getCrdt(message.crdt);
+			const crdt = this.components.get(message.crdt);
 
 			if (crdt == null || !isSynchronizable(crdt)) {
 				return this.rejectCrdt(message.crdt);
 			}
 
-			const synchronizer = toSynchronizable(crdt)?.getSynchronizer(message.protocol);
+			const synchronizer = getSynchronizer(crdt, message.protocol);
 
 			if (synchronizer == null) {
 				return this.rejectProtocol(message.crdt, message.protocol);
@@ -168,7 +169,7 @@ export class CRDTMapSynchronizer implements CRDTSynchronizer {
 
 		if (message.crdt != null) {
 			// Trying to select CRDT
-			if (this.components.getCrdt(message.crdt) == null) {
+			if (this.components.get(message.crdt) == null) {
 				return this.rejectCrdt(message.crdt);
 			}
 
@@ -243,22 +244,18 @@ export class CRDTMapSynchronizer implements CRDTSynchronizer {
 
 	// Get the next CRDT name.
 	private getNextCrdt(last?: string) {
-		return this.getNext(this.components.getCRDTKeys(), last);
+		return this.getNext(this.components.keys(), last);
 	}
 
 	// Get the next protocol name.
 	private getNextProtocol(crdtName: string, last?: string) {
-		const crdt = this.components.getCrdt(crdtName);
+		const crdt = this.components.get(crdtName);
 
 		if (crdt == null || !isSynchronizable(crdt)) {
 			return;
 		}
 
-		const iterable = toSynchronizable(crdt)?.getSynchronizerProtocols();
-
-		if (!iterable) {
-			return;
-		}
+		const iterable = getSynchronizerProtocols(crdt);
 
 		return this.getNext(iterable, last);
 	}
@@ -267,6 +264,10 @@ export class CRDTMapSynchronizer implements CRDTSynchronizer {
 	private getNext (iterable: Iterable<string>, last?: string): string | undefined {
 		const iterator = iterable[Symbol.iterator]();
 		let curr = iterator.next();
+
+		if (curr.done) {
+			return;
+		}
 
 		if (last == null) {
 			return curr.value;
