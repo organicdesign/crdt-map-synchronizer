@@ -7,6 +7,7 @@ A synchronizer for a CRDT Map.
 - [Install](#install)
 - [Usage](#usage)
 - [API](#api)
+  - [createCRDTMapSynchronizer](#createcrdtmapsynchronizer)
 - [Building](#building)
 - [Testing](#testing)
 
