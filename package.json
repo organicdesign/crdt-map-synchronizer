@@ -6,7 +6,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "test": "jest --config=jest.config.cjs ./test/*",
+    "test": "NODE_OPTIONS=--experimental-vm-modules jest --config=jest.config.cjs ./test/*",
     "build": "mkdir -p dist && touch dist/cleanup && rm dist/* && tsc -b",
     "build:protos": "protons protobufs/*.proto && mv protobufs/*.ts src/",
     "lint": "eslint ./src/* ./test/*"
