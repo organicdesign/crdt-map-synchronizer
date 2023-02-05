@@ -10,6 +10,7 @@ A synchronizer for a CRDT Map.
   - [createCRDTMapSynchronizer](#createcrdtmapsynchronizer)
 - [Building](#building)
 - [Testing](#testing)
+- [Improvements](#improvements)
 
 ## Install
 
@@ -66,3 +67,16 @@ To lint files:
 ```sh
 npm run lint
 ```
+
+## Improvements
+
+There are a number of things that could improve this synchronizer to increase it's efficiency:
+
+* [ ] Make it stateful - holding a little bit of state reduces the size of the data needed to be sent through the channel.
+* [ ] Parallel - running the requests in parallel instead of series would reduce round trips needed to synchronize it.
+* [ ] Keep track of accepted crdt/protocol matches - if we know a peer has accepted a crdt/protocol pair then it is likely that it would accept it again.
+
+Other things that need to be done:
+
+* [ ] Testing.
+* [ ] Better error handling.
