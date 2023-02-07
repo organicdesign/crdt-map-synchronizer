@@ -2,6 +2,7 @@ import {
 	CRDT,
 	CRDTSynchronizer,
 	SyncContext,
+	CreateSynchronizer,
 	isSynchronizable,
 	getSynchronizer,
 	getSynchronizerProtocols
@@ -9,7 +10,7 @@ import {
 //} from "@organicdesign/crdt-interfaces";
 import { SyncMessage, MessageType } from "./CRDTSyncProtocol.js";
 
-export interface CRDTMapSyncComponents {
+export type CRDTMapSyncComponents = {
 	keys (): Iterable<string>
 	get (key: string): CRDT | undefined
 	getId (): Uint8Array
@@ -285,4 +286,6 @@ export class CRDTMapSynchronizer implements CRDTSynchronizer {
 	}
 }
 
-export const createCRDTMapSynchronizer = (options?: Partial<CRDTMapSyncOpts>) => (components: CRDTMapSyncComponents) => new CRDTMapSynchronizer(components, options);
+export const createCRDTMapSynchronizer =
+	(options?: Partial<CRDTMapSyncOpts>): CreateSynchronizer<CRDTMapSyncComponents, CRDTMapSynchronizer> =>
+		(components: CRDTMapSyncComponents) => new CRDTMapSynchronizer(components, options);
