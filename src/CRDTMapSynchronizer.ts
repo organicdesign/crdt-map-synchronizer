@@ -6,8 +6,7 @@ import {
 	isSynchronizable,
 	getSynchronizer,
 	getSynchronizerProtocols
-} from "../../crdt-interfaces/src/index.js";
-//} from "@organicdesign/crdt-interfaces";
+} from "@organicdesign/crdt-interfaces";
 import { SyncMessage, MessageType } from "./CRDTSyncProtocol.js";
 
 export type CRDTMapSyncComponents = {
