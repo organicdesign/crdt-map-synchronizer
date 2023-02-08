@@ -3,6 +3,7 @@
   "name": "@organicdesign/crdt-map-synchronizer",
   "version": "0.1.0",
   "description": " A synchronizer for a CRDT Map.",
+  "keywords": ["crdt", "crdt-map", "synchronizer"],
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
